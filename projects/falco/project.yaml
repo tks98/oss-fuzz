@@ -1,0 +1,10 @@
+homepage: "https://falco.org"
+main_repo: "https://github.com/falcosecurity/falco"
+language: c++
+primary_contact:
+  - "cncf-falco-dev@lists.cncf.io"
+sanitizers:
+  - address
+  - undefined
+fuzzing_engines:
+  - libfuzzer
