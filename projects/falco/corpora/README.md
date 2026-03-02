@@ -1,59 +1,112 @@
 # Falco OSS-Fuzz corpora
 
-This directory contains seed inputs for the `fuzz_scap_event_decode` libFuzzer
-target.
+This directory contains seed inputs for `fuzz_scap_event_decode`.
+
+## What this target is fuzzing
+
+`libscap` is Falco's low-level event parser.
+
+1. Raw event bytes come from kernel capture drivers or `.scap` files.
+2. `libscap` decodes those bytes.
+3. Upper layers (`libsinsp`, rule engine) consume decoded events.
+
+This target focuses on:
+
+1. `scap_event_getinfo` (event-type metadata lookup)
+2. `scap_event_decode_params` (parameter boundary decode)
+3. Basic payload-byte access for decoded parameters
+
+## What "parameter" means here
+
+A parameter is one event argument/field in a `scap_evt`.
+
+Event layout:
+
+1. Event header (`type`, `nparams`, etc.)
+2. Parameter length table
+3. Parameter payload bytes
+
+`type` chooses the schema (which parameters exist and how they are read).
 
 ## Seed source
 
-The files prefixed with `real_` are raw `scap_evt` blobs extracted from
-Falco-libs savefile test captures:
+`real_*.bin` files are raw `scap_evt` blobs extracted from:
 
-- `test/libsinsp_e2e/resources/captures/curl_google.scap`
-- `test/libsinsp_e2e/resources/captures/test_ipv6_client.scap`
+1. `test/libsinsp_e2e/resources/captures/curl_google.scap`
+2. `test/libsinsp_e2e/resources/captures/test_ipv6_client.scap`
 
-Extraction method:
+Extraction steps:
 
-1. Open savefiles with `libscap` (`scap_savefile_engine`).
-2. Iterate events with `scap_next`.
-3. Write each event as `ev->len` bytes from the returned `scap_evt*`.
-4. Curate a small, deterministic subset by event type and length.
+1. Open savefiles with `libscap` (`scap_savefile_engine`)
+2. Iterate events with `scap_next`
+3. Write each event as `ev->len` bytes
+4. Keep a small deterministic subset by event type + length
 
-This first-pass corpus intentionally keeps only a small real-seed baseline and
-is packaged into `*_seed_corpus.zip` artifacts by `projects/falco/build.sh`.
+## Example `scap_evt` bytes
 
-## Why these captures
+Example from checked-in seed `real_curl_google_type1_len34.bin`:
 
-`curl_google.scap` and `test_ipv6_client.scap` were chosen because they are
-already maintained as upstream Falco-libs test fixtures and provide a practical
-mix of real event shapes (including syscall/network-related records) without
-adding external data dependencies.
+```text
+49 69 57 42 7e bc 4b 15   # ts      = 1534527348514711881
+59 44 00 00 00 00 00 00   # tid     = 17497
+22 00 00 00               # len     = 34 bytes total
+01 00                     # type    = 1
+02 00 00 00               # nparams = 2
+02 00 02 00               # param lengths: [2, 2]
+4b 00                     # param[0] bytes
+0a 00                     # param[1] bytes
+```
 
-The goal here is not to model a specific workload. The goal is to seed the
-fuzzer with realistic `scap_evt` byte layouts that help reach parser logic
-quickly and reproducibly.
+Quick check:
 
-## Why keep a checked-in corpus
+```bash
+python3 - <<'PY' projects/falco/corpora/fuzz_scap_event_decode/real_curl_google_type1_len34.bin
+import struct
+import sys
+from pathlib import Path
 
-For an initial OSS-Fuzz integration, checked-in seed files provide:
+b = Path(sys.argv[1]).read_bytes()
+ts, tid, elen, etype, nparams = struct.unpack_from("<QQIHI", b, 0)
+l1, l2 = struct.unpack_from("<HH", b, 26)
+print(f"size={len(b)} len={elen} type={etype} nparams={nparams}")
+print(f"ts={ts} tid={tid} param_lens=[{l1},{l2}]")
+PY
+```
 
-1. Deterministic startup coverage across local runs and CI.
-2. Faster path discovery than starting from an empty corpus.
-3. Reviewer-visible provenance for each seed input.
+Expected output:
 
-The corpus is intentionally small to keep the first MR easy to review and cheap
-to run. It can be expanded in follow-up changes.
+```text
+size=34 len=34 type=1 nparams=2
+ts=1534527348514711881 tid=17497 param_lens=[2,2]
+```
+
+## Why checked-in seeds
+
+1. Deterministic startup coverage
+2. Faster signal than empty corpus
+3. Reviewable provenance for each seed
 
 ## Recreate the corpus
 
-You can regenerate the `real_*.bin` files deterministically with:
+Canonical generation tooling currently lives in:
+
+1. [tks98/libs](https://github.com/tks98/libs/tree/master/test/libscap/fuzz/tools)
+2. Later switch to [falcosecurity/libs](https://github.com/falcosecurity/libs/tree/master/test/libscap/fuzz/tools) once merged
+
+This does not change `projects/falco/build.sh`: OSS-Fuzz still builds against
+the Falco-pinned upstream `falcosecurity/libs` tag.
+
+Regenerate seeds:
 
 ```bash
-./projects/falco/tools/recreate_real_corpus.sh
+git clone https://github.com/tks98/libs /tmp/tks98-libs
+cd /tmp/tks98-libs
+./test/libscap/fuzz/tools/recreate_seed_corpus.sh
 ```
 
-Optional environment overrides:
+Copy into this project:
 
-1. `LIBS_VERSION` (default: `0.23.1`)
-2. `WORK_DIR` (default: `/tmp/falco-ossfuzz-corpus-rebuild`)
-3. `MAX_EVENTS` (default: `500`)
-4. `MAX_LEN` (default: `4096`)
+```bash
+cp /tmp/tks98-libs/test/libscap/fuzz/corpus/fuzz_scap_event_decode/real_*.bin \
+  projects/falco/corpora/fuzz_scap_event_decode/
+```
